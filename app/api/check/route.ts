@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { runComplianceCheck } from "@/lib/checker";
 import { runBrowserAudit } from "@/lib/audit-playwright";
 
-export const maxDuration = 120;
+export const maxDuration = 60; // batas aman Vercel Hobby; cukup untuk mesin statis
 
 export async function POST(req: NextRequest) {
   try {

@@ -65,8 +65,20 @@ async function cek(){
       checks.push({no,key:k,kriteria:label,status:m?'PASS':'FAIL',bukti:m?`${m.textContent.trim()} -> ${m.getAttribute('href')}`:'tidak ditemukan'});
     });
     const logoA=logo?logo.closest('a'):null;
-    const href=logoA?logoA.getAttribute('href'):'';
-    checks.push({no:8,key:'logohome',kriteria:'Logo → Home',status:(href==='/'||href==='./'||(href||'').includes(location.hostname||''))||href===''&&!!logoA?'PASS':(logoA?'FAIL':'FAIL'),bukti:logoA?`href=${href}`:'tanpa parent <a>'});
+    const href=(logoA?logoA.getAttribute('href'):'')||'';
+    // BUGFIX: bandingkan dengan hostname SITUS TARGET (raw), bukan alamat halaman checker ini
+    let homePass=false;
+    if(logoA){
+      if(href===''||href==='/'||href==='./') homePass=true;
+      else if(!href.startsWith('#')&&!href.toLowerCase().startsWith('javascript')){
+        try{
+          const u=new URL(href,raw);
+          const tHost=new URL(raw).hostname;
+          homePass=u.hostname===tHost&&(u.pathname==='/'||u.pathname===''||u.href===raw);
+        }catch(e){ homePass=false; }
+      }
+    }
+    checks.push({no:8,key:'logohome',kriteria:'Logo → Home',status:homePass?'PASS':'FAIL',bukti:logoA?`href=${href}`:'tanpa parent <a>'});
     // ---- 9. MOBILE RESPONSIVE (info, tidak memengaruhi skor 8 cek) ----
     prog.textContent='Mengecek mobile-responsive...';
     const vpEl=doc.querySelector('meta[name="viewport"]');

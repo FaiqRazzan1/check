@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { CheckResponse } from "@/lib/checker";
 import type { VisualMobileResult } from "@/lib/mobile-playwright";
 
@@ -23,6 +23,13 @@ export default function Home() {
   const [visualLoading, setVisualLoading] = useState(false);
   const [visualError, setVisualError] = useState("");
   const [accurate, setAccurate] = useState(false);
+  // Fitur Chromium (mode akurat + tes visual) butuh browser di server.
+  // Muncul di localhost ATAU bila server mengaktifkan NEXT_PUBLIC_BROWSER_ENABLED=true (deploy Docker/VPS).
+  const [isLocal, setIsLocal] = useState(false);
+  useEffect(() => {
+    const h = window.location.hostname;
+    setIsLocal(h === "localhost" || h === "127.0.0.1" || process.env.NEXT_PUBLIC_BROWSER_ENABLED === "true");
+  }, []);
 
   async function cek() {
     setError("");
@@ -113,10 +120,12 @@ export default function Home() {
         <button className="underline" onClick={() => setUrl("https://example.com")}>https://example.com</button>
         {" • "}
         <button className="underline" onClick={() => setUrl("https://wikipedia.org")}>https://wikipedia.org</button></span>
+        {isLocal && (
         <label className="flex cursor-pointer items-center gap-1 text-xs text-sky-300">
           <input type="checkbox" checked={accurate} onChange={(e) => setAccurate(e.target.checked)} />
           🎯 Mode akurat — render browser beneran (~15–60 dtk, atasi SPA/JS)
         </label>
+        )}
       </div>
 
       {loading && <p className="mt-4 animate-pulse text-amber-300">⏳ {STEPS[step]}</p>}
@@ -202,6 +211,7 @@ export default function Home() {
               {data.mobile.status === "FAIL" && (
                 <div className="mt-3 rounded-lg bg-slate-950 p-3">
                   <p className="text-xs text-slate-500">Perbaikan untuk cek ini ada di panel <b>🔧 Yang Harus Diperbaiki</b> di atas (cek #9).</p>
+                  {isLocal && (
                   <div className="no-print mt-2">
                     <button
                       onClick={tesVisual}
@@ -211,9 +221,10 @@ export default function Home() {
                       {visualLoading ? "⏳ Merender HP 360×640..." : "📸 Tes visual HP beneran (Playwright 360×640)"}
                     </button>
                   </div>
+                  )}
                 </div>
               )}
-              {data.mobile.status === "PASS" && (
+              {data.mobile.status === "PASS" && isLocal && (
                 <div className="no-print mt-3">
                   <button
                     onClick={tesVisual}
