@@ -131,10 +131,42 @@ function isSoft404(text: string): boolean {
 export async function runComplianceCheck(rawUrl: string): Promise<CheckResponse> {
   const target = normalizeUrl(rawUrl);
   const t0 = Date.now();
-  const res = await fetchWithTimeout(target, 15000);
-  const finalUrl = res.url || target;
+  // Retry 1x untuk kegagalan transient (timeout/abort) — kurangi false-FAIL
+  let res: Response | null = null;
+  let lastErr = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      res = await fetchWithTimeout(target, 15000);
+      break;
+    } catch (e: any) {
+      lastErr = e?.message || "fetch gagal";
+      if (!/abort|timeout|timed out|network|fetch failed|econn/i.test(lastErr)) break;
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+  }
+  if (!res) throw new Error(`Fetch homepage gagal: ${lastErr}`);
+  let finalUrl = res.url || target;
   if (!res.ok) throw new Error(`Fetch homepage gagal: HTTP ${res.status}`);
-  const html = await res.text();
+  let html = await res.text();
+  // Ikuti meta-refresh redirect 1 hop (mis. halaman parkir/splash) — tanpa browser
+  const $first = cheerio.load(html);
+  let refresh = "";
+  $first("meta[http-equiv]").each((_, el) => {
+    if ((($first(el).attr("http-equiv") || "").toLowerCase() === "refresh")) {
+      refresh = $first(el).attr("content") || "";
+    }
+  });
+  const mRefresh = refresh.match(/url\s*=\s*(.+)/i);
+  if (mRefresh) {
+    try {
+      const abs = new URL(mRefresh[1].trim().replace(/^['"]|['"]$/g, ""), finalUrl).toString();
+      const r2 = await fetchWithTimeout(abs, 12000);
+      if (r2.ok) {
+        finalUrl = r2.url || abs;
+        html = await r2.text();
+      }
+    } catch {}
+  }
   const loadMs = Date.now() - t0;
   const $ = cheerio.load(html);
   const base = new URL(finalUrl);
@@ -189,7 +221,10 @@ export async function runComplianceCheck(rawUrl: string): Promise<CheckResponse>
   let logoHref: string | null = null;
   if (logoEl && logoEl.length) {
     const tag = (logoEl.get(0) as any)?.tagName || "img";
-    const src = logoEl.attr("src") || "";
+    // Dukung lazy-load: data-src / data-lazy-src / srcset (false-negatif umum di tema modern)
+    const srcset = logoEl.attr("srcset") || "";
+    const srcsetFirst = (srcset.split(",")[0] || "").trim().split(/\s+/)[0] || "";
+    const src = logoEl.attr("src") || logoEl.attr("data-src") || logoEl.attr("data-lazy-src") || logoEl.attr("data-original") || srcsetFirst || "";
     const alt = logoEl.attr("alt") || logoEl.attr("aria-label") || "";
     const style = (logoEl.attr("style") || "").toLowerCase();
     const hidden = style.includes("display:none") || style.includes("visibility:hidden");
@@ -264,37 +299,92 @@ export async function runComplianceCheck(rawUrl: string): Promise<CheckResponse>
     };
   });
 
+  // Validasi isi halaman: 200 + cukup panjang + bukan soft-404 (dipakai jalur DOM & sitemap)
+  async function validatePage(abs: string, shownText: string, via: string): Promise<{ ok: boolean; bukti: string; foundUrl: string }> {
+    try {
+      const r = await fetchWithTimeout(abs, 12000);
+      const body = r.ok ? await r.text() : "";
+      if (!r.ok) return { ok: false, bukti: `"${shownText}" → ${abs} HTTP ${r.status}${via}`, foundUrl: abs };
+      if (isSoft404(body)) return { ok: false, bukti: `"${shownText}" → ${abs} HTTP 200 tapi konten <500 char / soft-404 (${body.length} chars)${via}`, foundUrl: abs };
+      return { ok: true, bukti: `"${shownText}" → ${abs} HTTP 200, ${body.length} chars${via}`, foundUrl: abs };
+    } catch (e: any) {
+      return { ok: false, bukti: `"${shownText}" → ${abs} fetch error: ${e?.message || e}${via}`, foundUrl: abs };
+    }
+  }
+
+  // Fallback: cari URL halaman di sitemap.xml bila link tidak ketemu di DOM
+  // (kurangi false-negatif untuk redaksi link tak biasa). Cache berupa promise
+  // agar aman dipanggil konkuren via Promise.all.
+  let sitemapPromise: Promise<string[]> | null = null;
+  function loadSitemap(): Promise<string[]> {
+    if (!sitemapPromise) {
+      sitemapPromise = (async () => {
+        const found: string[] = [];
+        try {
+          const r = await fetchWithTimeout(origin + "/sitemap.xml", 8000);
+          if (!r.ok) return found;
+          const xml = (await r.text()).slice(0, 300_000);
+          const locs = Array.from(xml.matchAll(/<loc>([^<]+)<\/loc>/gi)).map((m) => m[1].trim()).filter(Boolean);
+          const childMaps = locs.filter((u) => u.toLowerCase().endsWith(".xml")).slice(0, 2);
+          const pageUrls = locs.filter((u) => !u.toLowerCase().endsWith(".xml"));
+          for (const cm of childMaps) {
+            try {
+              const rc = await fetchWithTimeout(cm, 8000);
+              if (!rc.ok) continue;
+              const xc = (await rc.text()).slice(0, 300_000);
+              for (const m of Array.from(xc.matchAll(/<loc>([^<]+)<\/loc>/gi))) {
+                const u = m[1].trim();
+                if (u && !u.toLowerCase().endsWith(".xml")) pageUrls.push(u);
+                if (pageUrls.length > 2000) break;
+              }
+            } catch {}
+          }
+          return Array.from(new Set(pageUrls)).slice(0, 2000);
+        } catch {
+          return found;
+        }
+      })();
+    }
+    return sitemapPromise;
+  }
+
   async function checkPage(key: string, label: string, no: number): Promise<CheckItem> {
     const rx = LINK_PATTERNS[key];
     const match = anchors.find(
       (a) => rx.test(a.text) || rx.test(a.href)
     );
-    if (!match || !match.href || match.href.startsWith("#") || match.href.startsWith("javascript")) {
-      return {
-        no, key, kriteria: label, status: "FAIL",
-        bukti: match ? `teks="${match.text}" href="${match.href}" tapi href tidak valid` : "Link tidak ditemukan (fuzzy match gagal)",
-        perbaikan: FIX_SNIPPETS[key].perbaikan, snippet: FIX_SNIPPETS[key].snippet, foundUrl: null,
-      };
-    }
-    let abs = "";
-    try {
-      abs = new URL(match.href, finalUrl).toString();
-    } catch {
-      return { no, key, kriteria: label, status: "FAIL", bukti: `href relatif tidak bisa di-resolve: ${match.href}`, perbaikan: FIX_SNIPPETS[key].perbaikan, snippet: FIX_SNIPPETS[key].snippet, foundUrl: null };
-    }
-    try {
-      const r = await fetchWithTimeout(abs, 12000);
-      const body = r.ok ? await r.text() : "";
-      if (!r.ok) {
-        return { no, key, kriteria: label, status: "FAIL", bukti: `"${match.text}" → ${abs} HTTP ${r.status}`, perbaikan: `${FIX_SNIPPETS[key].perbaikan} Link ada tapi mati (${r.status}).`, snippet: FIX_SNIPPETS[key].snippet, foundUrl: abs };
+    if (match && match.href && !match.href.startsWith("#") && !match.href.startsWith("javascript")) {
+      let abs = "";
+      try {
+        abs = new URL(match.href, finalUrl).toString();
+      } catch {
+        return { no, key, kriteria: label, status: "FAIL", bukti: `href relatif tidak bisa di-resolve: ${match.href}`, perbaikan: FIX_SNIPPETS[key].perbaikan, snippet: FIX_SNIPPETS[key].snippet, foundUrl: null };
       }
-      if (isSoft404(body)) {
-        return { no, key, kriteria: label, status: "FAIL", bukti: `"${match.text}" → ${abs} HTTP 200 tapi konten <500 char / soft-404 (${body.length} chars)`, perbaikan: `${FIX_SNIPPETS[key].perbaikan} Halaman terdeteksi soft-404.`, snippet: FIX_SNIPPETS[key].snippet, foundUrl: abs };
+      const v = await validatePage(abs, match.text, "");
+      if (v.ok) {
+        return { no, key, kriteria: label, status: "PASS", bukti: v.bukti, perbaikan: "-", foundUrl: v.foundUrl };
       }
-      return { no, key, kriteria: label, status: "PASS", bukti: `"${match.text}" → ${abs} HTTP 200, ${body.length} chars`, perbaikan: "-", foundUrl: abs };
-    } catch (e: any) {
-      return { no, key, kriteria: label, status: "FAIL", bukti: `"${match.text}" → ${abs} fetch error: ${e?.message || e}`, perbaikan: FIX_SNIPPETS[key].perbaikan, snippet: FIX_SNIPPETS[key].snippet, foundUrl: abs };
+      const dead = v.bukti.includes("HTTP") && !v.bukti.includes("200");
+      return { no, key, kriteria: label, status: "FAIL", bukti: v.bukti, perbaikan: `${FIX_SNIPPETS[key].perbaikan}${dead ? " Link ada tapi mati." : " Halaman terdeteksi soft-404."}`, snippet: FIX_SNIPPETS[key].snippet, foundUrl: v.foundUrl };
     }
+    // Jalur 2: tidak ada link valid di DOM → intip sitemap.xml
+    const domNote = match ? `teks="${match.text}" href="${match.href}" tapi href tidak valid. ` : "Link tidak ditemukan (fuzzy match gagal). ";
+    const locs = await loadSitemap();
+    const hit = locs.find((u) => rx.test(u));
+    if (hit) {
+      let abs = hit;
+      try { abs = new URL(hit, finalUrl).toString(); } catch {}
+      const v = await validatePage(abs, label + " (via sitemap)", " [sitemap]");
+      if (v.ok) {
+        return { no, key, kriteria: label, status: "PASS", bukti: v.bukti, perbaikan: "-", foundUrl: v.foundUrl };
+      }
+      return { no, key, kriteria: label, status: "FAIL", bukti: domNote + v.bukti, perbaikan: `${FIX_SNIPPETS[key].perbaikan} URL sitemap bermasalah.`, snippet: FIX_SNIPPETS[key].snippet, foundUrl: v.foundUrl };
+    }
+    return {
+      no, key, kriteria: label, status: "FAIL",
+      bukti: domNote + "Sitemap juga tidak memuat URL cocok.",
+      perbaikan: FIX_SNIPPETS[key].perbaikan, snippet: FIX_SNIPPETS[key].snippet, foundUrl: null,
+    };
   }
 
   const pageChecks = await Promise.all([

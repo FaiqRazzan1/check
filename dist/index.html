@@ -44,6 +44,14 @@ const FIX={
 function findLink(links,rx){
   return [...links].find(a=>rx.test(a.textContent||'')||rx.test(a.getAttribute('href')||''));
 }
+// Samakan dengan mesin Next.js: href fragment (#...), javascript:, atau kosong = TIDAK VALID
+function validHref(h){
+  h=(h||'').trim();
+  if(!h) return false;
+  if(h.startsWith('#')) return false;
+  if(h.toLowerCase().startsWith('javascript:')) return false;
+  return true;
+}
 async function cek(){
   const prog=document.getElementById('prog'),out=document.getElementById('out');
   out.innerHTML='';prog.textContent='Mengambil HTML...';
@@ -62,7 +70,12 @@ async function cek(){
     const links=doc.querySelectorAll('a');
     [['about','About Us',3],['dmca','DMCA',4],['contact','Contact Us',5],['tos','ToS',6],['privacy','Privacy Policy',7]].forEach(([k,label,no])=>{
       const m=findLink(links,PATS[k]);
-      checks.push({no,key:k,kriteria:label,status:m?'PASS':'FAIL',bukti:m?`${m.textContent.trim()} -> ${m.getAttribute('href')}`:'tidak ditemukan'});
+      const h=(m?(m.getAttribute('href')||''):'').trim();
+      if(m&&validHref(h)){
+        checks.push({no,key:k,kriteria:label,status:'PASS',bukti:`${m.textContent.trim()} -> ${h}`});
+      }else{
+        checks.push({no,key:k,kriteria:label,status:'FAIL',bukti:m?`teks="${(m.textContent||'').trim()}" href="${h}" tapi href tidak valid (fragment/kosong)`:'tidak ditemukan'});
+      }
     });
     const logoA=logo?logo.closest('a'):null;
     const href=(logoA?logoA.getAttribute('href'):'')||'';

@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   title: "Website Compliance Checker",
-  description: "Cek 8 kriteria kepatuhan halaman web — skor 100% = PASS",
+  description: "Cek 9 kriteria kepatuhan halaman web + mobile-responsive — 100% = PASS",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
