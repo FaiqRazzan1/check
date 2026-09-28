@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Compliance Checker (Single File)</title>
+<link rel="icon" href="/favicon.ico" type="image/x-icon">
+<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+<main class="max-w-4xl mx-auto p-6">
+<h1 class="text-2xl font-bold">🛡️ Compliance Checker — Single HTML</h1>
+<p class="text-sm text-slate-400 mt-1">Tanpa backend. Untuk situs beda origin, aktifkan CORS proxy di bawah.</p>
+<div class="mt-4 flex flex-col sm:flex-row gap-2">
+<input id="url" placeholder="https://contoh.com" class="flex-1 rounded-lg bg-slate-900 border border-slate-700 px-4 py-3 outline-none">
+<button onclick="cek()" id="btn" class="rounded-lg bg-emerald-500 text-slate-950 font-semibold px-6 py-3">Cek Sekarang</button>
+</div>
+<label class="text-xs text-slate-500 mt-2 block"><input type="checkbox" id="proxy" checked> pakai CORS proxy (api.allorigins.win) bila fetch langsung diblokir</label>
+<p id="prog" class="mt-3 text-amber-300"></p>
+<div id="out" class="mt-4"></div>
+</main>
+<script>
+function norm(u){u=(u||'').trim();if(!u)throw new Error('URL kosong');if(!/^https?:\/\//i.test(u))u='https://'+u;return u;}
+async function fetchText(url,useProxy){
+  const target=useProxy?'https://api.allorigins.win/raw?url='+encodeURIComponent(url):url;
+  const ctrl=new AbortController();const t=setTimeout(()=>ctrl.abort(),15000);
+  try{const r=await fetch(target,{signal:ctrl.signal});if(!r.ok)throw new Error('HTTP '+r.status);return await r.text();}
+  finally{clearTimeout(t);}
+}
+const PATS={about:/about|tentang/i,dmca:/dmca/i,contact:/contact|hubungi|kontak/i,tos:/terms|tos|syarat|ketentuan/i,privacy:/privacy|privasi|kebijakan/i};
+function findLink(links,rx){
+  return [...links].find(a=>rx.test(a.textContent||'')||rx.test(a.getAttribute('href')||''));
+}
+async function cek(){
+  const prog=document.getElementById('prog'),out=document.getElementById('out');
+  out.innerHTML='';prog.textContent='Mengambil HTML...';
+  try{
+    const raw=norm(document.getElementById('url').value);
+    const useProxy=document.getElementById('proxy').checked;
+    let html='';
+    try{html=await fetchText(raw,false);}catch(e){ if(!useProxy)throw e; prog.textContent='Fetch langsung diblokir CORS, coba via proxy...'; html=await fetchText(raw,true);}
+    prog.textContent='Mengecek logo... favicon... footer...';
+    const doc=new DOMParser().parseFromString(html,'text/html');
+    const checks=[];
+    const logo=doc.querySelector('header img, a > img, img[class*="logo" i], [class*="logo" i] img')||[...doc.querySelectorAll('img')].find(i=>((i.src||'')+(i.alt||'')).toLowerCase().includes('logo'));
+    checks.push({no:1,kriteria:'Logo',status:logo&&((logo.alt||'').trim()!=='')?'PASS':'FAIL',bukti:logo?`src=${logo.getAttribute('src')} alt=${logo.getAttribute('alt')}`:'tidak ditemukan'});
+    const fav=doc.querySelector('link[rel*="icon" i]');
+    checks.push({no:2,kriteria:'Favicon',status:fav?'PASS':'FAIL',bukti:fav?fav.getAttribute('href'):'tidak ada link[rel*=icon] (fallback /favicon.ico belum dicek fetch)'});
+    const links=doc.querySelectorAll('a');
+    [['about','About Us',3],['dmca','DMCA',4],['contact','Contact Us',5],['tos','ToS',6],['privacy','Privacy',7]].forEach(([k,label,no])=>{
+      const m=findLink(links,PATS[k]);
+      checks.push({no,kriteria:label,status:m?'PASS':'FAIL',bukti:m?`${m.textContent.trim()} -> ${m.getAttribute('href')}`:'tidak ditemukan'});
+    });
+    const logoA=logo?logo.closest('a'):null;
+    const href=logoA?logoA.getAttribute('href'):'';
+    checks.push({no:8,kriteria:'Logo → Home',status:(href==='/'||href==='./'||(href||'').includes(location.hostname||''))||href===''&&!!logoA?'PASS':(logoA?'FAIL':'FAIL'),bukti:logoA?`href=${href}`:'tanpa parent <a>'});
+    // ---- 9. MOBILE RESPONSIVE (info, tidak memengaruhi skor 8 cek) ----
+    prog.textContent='Mengecek mobile-responsive...';
+    const vp=(doc.querySelector('meta[name="viewport"]')||{}).content||doc.querySelector('meta[name="viewport"]')?.getAttribute('content')||'';
+    const vpOk=/width\s*=\s*device-width/i.test(vp||'');
+    let cssText='';doc.querySelectorAll('style').forEach(s=>cssText+=s.textContent||'');
+    const mediaCount=(cssText.match(/@media[^{]*\((max|min)-width/gi)||[]).length;
+    const hints=[];
+    if(/(sm:|md:|lg:|grid-cols-|flex-col md:flex-row)/.test(html))hints.push('Tailwind responsif');
+    if(/(col-(xs|sm|md|lg)-|navbar-toggler|container-fluid)/.test(html))hints.push('Bootstrap responsif');
+    if(/max-width\s*:\s*100%/.test(cssText))hints.push('fluid max-width:100%');
+    const bigFixed=(html.match(/width\s*:\s*(\d{3,4})px/gi)||[]).filter(w=>parseInt(w.replace(/\D/g,''),10)>=768);
+    const mobPass=vpOk&&(mediaCount>0||hints.length>0);
+    const mobBukti=`viewport=${vpOk?'"'+vp+'"':'(tidak ada)'} | @media=${mediaCount} | pola=[${hints.join('; ')||'-'}]${bigFixed.length?` | ⚠ ${bigFixed.length} lebar fix ≥768px`:''}`;
+    checks.push({no:9,kriteria:'Mobile-responsive',status:mobPass?'PASS':'FAIL',bukti:mobBukti});
+    const passed=checks.filter(c=>c.status==='PASS').length;
+    const score=Math.round((passed*100)/9); // 9 cek gabung, @~11,11%
+    const status=score===100?'PASS':'FAIL';
+    out.innerHTML=`<div class="rounded-2xl border border-slate-800 bg-slate-900 p-5">
+      <div class="text-4xl font-bold ${status==='PASS'?'text-green-400':'text-red-400'}">${score}% <span class="text-base">${status}</span></div>
+      <table class="w-full text-sm mt-3"><tbody>${checks.map(c=>`<tr class="border-t border-slate-800"><td class="p-2">${c.no}</td><td class="p-2">${c.kriteria}</td><td class="p-2">${c.status==='PASS'?'✅ PASS':'❌ FAIL'}</td><td class="p-2 text-xs text-slate-400">${c.bukti}</td></tr>`).join('')}</tbody></table>
+      <div class="mt-3 rounded-xl p-3 text-sm ${mobPass?'bg-emerald-950 border border-emerald-800':'bg-amber-950 border border-amber-800'}">📱 Mobile-Responsive: <b>${mobPass?'✅ YA':'❌ BELUM'}</b> (cek #9, masuk skor)<br><span class="text-xs text-slate-400">${mobBukti}</span></div>
+      <p class="text-xs text-slate-500 mt-2">Catatan: single-file tidak bisa fetch validasi HTTP 200 lintas origin tanpa proxy; untuk audit akurat (cek status + soft-404) pakai versi Next.js /api/check.</p>
+      <div class="mt-2 flex gap-2"><button onclick='navigator.clipboard.writeText(document.getElementById("url").value)' class="rounded bg-slate-700 px-3 py-1 text-xs">Copy URL</button><button onclick="window.print()" class="rounded bg-slate-700 px-3 py-1 text-xs">PDF / Print</button></div>
+    </div>`;
+    prog.textContent='';
+  }catch(e){prog.textContent='❌ '+e.message;}
+}
+</script>
+</body>
+</html>
