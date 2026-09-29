@@ -1,5 +1,6 @@
 import { chromium } from "playwright";
 import { normalizeUrl, type CheckItem, type CheckResponse } from "./checker";
+import { isHomeUrl, resolveLogoHref } from "./logo-home";
 
 // Pola fuzzy sama seperti mesin statis (disinkronkan)
 const PATTERNS: Record<string, string> = {
@@ -90,8 +91,6 @@ export async function runBrowserAudit(rawUrl: string): Promise<CheckResponse> {
     await page.waitForTimeout(2000); // SPA hydration / lazy-load
     if ((res?.status() ?? 500) >= 400) throw new Error(`Navigasi gagal: HTTP ${res?.status()}`);
     const finalUrl = page.url();
-    const homeUrl = new URL(finalUrl);
-    const origin = homeUrl.origin;
 
     // ---- 1+8. LOGO (render beneran) ----
     const logo: any = await page.evaluate(LOGO_JS);
@@ -166,17 +165,72 @@ export async function runBrowserAudit(rawUrl: string): Promise<CheckResponse> {
     const keys = ["about", "dmca", "contact", "tos", "privacy"];
     for (let i = 0; i < keys.length; i++) pageChecks.push(await checkPage(keys[i], i + 3));
 
-    // ---- 8. LOGO → HOME (klik/navigasi beneran) ----
-    let homePass = false, homeBukti = "Tidak ada parent <a> pada logo";
-    if (logoHref) {
+    // ---- 8. LOGO → HOME (klik beneran, bukan cuma goto href) ----
+    // Ground truth = "logo diklik masuk home": klik elemen logo di halaman
+    // final, lalu cek URL mendarat dengan isHomeUrl (toleran /index.html,
+    // /home, /beranda, /id, query/hash, www, http↔https). Fallback: goto href.
+    let homePass = false, homeBukti = "Tidak ada logo untuk diklik";
+    const hrefTarget = logoHref ? resolveLogoHref(logoHref, finalUrl) : null;
+    if (logo?.found) {
       try {
-        const absHome = new URL(logoHref, finalUrl).toString();
-        const r = await page.goto(absHome, { waitUntil: "domcontentloaded", timeout: 15000 });
+        await page.goto(finalUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
+        await page.waitForTimeout(800);
+        const clickInfo: any = await page.evaluate(`(() => {
+          const sels = ['header a','header img','a > img[class*="logo" i]','img[class*="logo" i]','[class*="logo" i] img','a.brand','.navbar-brand','a[aria-label*="logo" i]'];
+          let el = null;
+          for (const s of sels) { try { const c = document.querySelector(s); if (c) { el = c; break; } } catch(e){} }
+          if (!el) {
+            for (const img of Array.from(document.images)) {
+              const blob = ((img.src||'')+' '+(img.alt||'')+' '+(img.className||'')).toLowerCase();
+              if (blob.includes('logo')) { el = img; break; }
+            }
+          }
+          if (!el) return { didClick: false, reason: 'logo tidak ketemu saat klik' };
+          const a = el.closest ? el.closest('a') : null;
+          const href = a ? a.getAttribute('href') : null;
+          const target = a ? a.getAttribute('target') : null;
+          try {
+            if (a && target === '_blank') { a.removeAttribute('target'); }
+            (a || el).scrollIntoView({ block: 'center' });
+            (a || el).click();
+          } catch (e) { return { didClick: false, reason: 'click() throw: ' + (e && e.message || e) }; }
+          return { didClick: true, href };
+        })()`);
+        await page.waitForLoadState("domcontentloaded", { timeout: 6000 }).catch(() => {});
+        await page.waitForTimeout(1200);
         const landed = page.url();
-        const lUrl = new URL(landed);
-        homePass = !!r?.ok() && lUrl.origin === origin && (lUrl.pathname === "/" || landed === finalUrl);
-        homeBukti = `logo href="${logoHref}" → mendarat ${landed} HTTP ${r?.status()}`;
-        if (!homePass) homeBukti += " | FAIL: bukan homepage / tidak 200";
+        if (clickInfo?.didClick && isHomeUrl(landed, finalUrl)) {
+          homePass = true;
+          homeBukti = `klik logo (href="${clickInfo.href ?? logoHref}") → mendarat ${landed} = home`;
+        } else if (hrefTarget) {
+          // Klik tidak navigasi ke home (mis. sudah di home tanpa reload / SPA
+          // tanpa navigasi) → validasi href secara navigasional sebagai fallback
+          const absHome = hrefTarget.toString();
+          if (!isHomeUrl(absHome, finalUrl)) {
+            homeBukti = `klik logo mendarat ${landed} bukan home; href="${logoHref}" → ${absHome} juga bukan homepage, FAIL`;
+          } else {
+            const r = await page.goto(absHome, { waitUntil: "domcontentloaded", timeout: 15000 });
+            const landed2 = page.url();
+            homePass = !!r?.ok() && isHomeUrl(landed2, finalUrl);
+            homeBukti = `klik logo mendarat ${landed}; fallback href="${logoHref}" → mendarat ${landed2} HTTP ${r?.status()}`;
+            if (!homePass) homeBukti += " | FAIL: bukan homepage / tidak 200";
+          }
+        } else {
+          homeBukti = `klik logo mendarat ${landed} bukan home; logo tanpa href navigasional (href="${logoHref}"), FAIL`;
+        }
+      } catch (e: any) { homeBukti = `klik logo error: ${e?.message || e}`; }
+    } else if (hrefTarget) {
+      try {
+        const absHome = hrefTarget.toString();
+        if (!isHomeUrl(absHome, finalUrl)) {
+          homeBukti = `logo href="${logoHref}" → ${absHome} bukan homepage, FAIL`;
+        } else {
+          const r = await page.goto(absHome, { waitUntil: "domcontentloaded", timeout: 15000 });
+          const landed = page.url();
+          homePass = !!r?.ok() && isHomeUrl(landed, finalUrl);
+          homeBukti = `logo href="${logoHref}" → mendarat ${landed} HTTP ${r?.status()}`;
+          if (!homePass) homeBukti += " | FAIL: bukan homepage / tidak 200";
+        }
       } catch (e: any) { homeBukti = `logo href="${logoHref}" error: ${e?.message || e}`; }
     }
 
@@ -218,7 +272,7 @@ export async function runBrowserAudit(rawUrl: string): Promise<CheckResponse> {
       { no: 1, key: "logo", kriteria: "Logo terlihat (alt tidak kosong, >16px)", status: logoPass ? "PASS" : "FAIL", bukti: logoBukti + " [browser]", perbaikan: logoPass ? "-" : FIX.logo, snippet: logoPass ? undefined : SNIPPET.logo, foundUrl: logoSrc || null },
       { no: 2, key: "favicon", kriteria: "Favicon dapat diakses (HTTP 200)", status: favPass ? "PASS" : "FAIL", bukti: favBukti + " [browser]", perbaikan: favPass ? "-" : FIX.favicon, snippet: favPass ? undefined : SNIPPET.favicon, foundUrl: favAbs || null },
       ...pageChecks,
-      { no: 8, key: "logohome", kriteria: "Logo diklik kembali ke Home", status: homePass ? "PASS" : "FAIL", bukti: homeBukti + " [browser]", perbaikan: homePass ? "-" : FIX.logohome, snippet: homePass ? undefined : SNIPPET.logohome, foundUrl: logoHref ? new URL(logoHref, finalUrl).toString() : null },
+      { no: 8, key: "logohome", kriteria: "Logo diklik kembali ke Home", status: homePass ? "PASS" : "FAIL", bukti: homeBukti + " [browser]", perbaikan: homePass ? "-" : FIX.logohome, snippet: homePass ? undefined : SNIPPET.logohome, foundUrl: hrefTarget ? hrefTarget.toString() : null },
       { no: 9, key: "mobile", kriteria: "Mobile-responsive", status: mobilePass ? "PASS" : "FAIL", bukti: mobileBukti + " [browser]", perbaikan: mobilePass ? "-" : FIX.mobile, snippet: mobilePass ? undefined : SNIPPET.mobile, foundUrl: null },
     ];
     const passed = checks.filter((c) => c.status === "PASS").length;

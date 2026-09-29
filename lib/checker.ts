@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import { isHomeUrl, resolveLogoHref } from "./logo-home";
 
 export type CheckItem = {
   no: number;
@@ -395,33 +396,32 @@ export async function runComplianceCheck(rawUrl: string): Promise<CheckResponse>
     checkPage("privacy", "Halaman/link Privacy Policy", 7),
   ]);
 
-  // ---- 8. LOGO → HOME ----
+  // ---- 8. LOGO → HOME (ketat: href harus menunjuk home + navigasi 200) ----
   let homePass = false;
   let homeBukti = "Tidak ada parent <a> pada logo";
-  if (logoHref) {
+  const logoTarget = resolveLogoHref(logoHref, finalUrl);
+  if (logoHref !== null && logoHref !== undefined && logoHref.trim() === "" && logoEl && logoEl.length) {
+    // href="" = reload halaman aktif; karena yang diaudit adalah homepage,
+    // klik logo tetap di home (konsisten dengan uji klik browser) — terima.
+    homePass = true;
+    homeBukti = `logo href="" → reload ${finalUrl} HTTP 200 (sudah di home)`;
+  } else if (logoTarget) {
+    const absHome = logoTarget.toString();
     try {
-      const absHome = new URL(logoHref, finalUrl).toString();
-      const homeUrl = new URL(absHome);
-      const isRoot =
-        homeUrl.pathname === "/" ||
-        homeUrl.pathname === "" ||
-        homeUrl.href === origin + "/" ||
-        absHome === finalUrl ||
-        absHome === origin ||
-        absHome === origin + "/";
-      if (isRoot || homeUrl.origin === base.origin) {
+      const home = isHomeUrl(absHome, finalUrl);
+      if (!home) {
+        homeBukti = `logo href="${logoHref}" → ${absHome} bukan homepage, FAIL`;
+      } else {
         const r = await fetchWithTimeout(absHome, 10000);
         homePass = r.ok;
-        homeBukti = `logo href="${logoHref}" → ${absHome} HTTP ${r.status} isRoot=${isRoot}`;
+        homeBukti = `logo href="${logoHref}" → ${absHome} HTTP ${r.status} isHome=true`;
         if (!r.ok) homeBukti += " | FAIL: navigasi tidak 200";
-        else if (!isRoot) homeBukti += " | catatan: href bukan root tapi masih satu origin & 200 (diterima longgar)";
-        if (!isRoot && r.ok) homePass = true;
-      } else {
-        homeBukti = `logo href="${logoHref}" → ${absHome} beda origin, FAIL`;
       }
     } catch (e: any) {
       homeBukti = `logo href="${logoHref}" error: ${e?.message || e}`;
     }
+  } else if (logoHref) {
+    homeBukti = `logo href="${logoHref}" tidak navigasional (kosong/fragment/javascript:), FAIL`;
   }
 
   // ---- 9. MOBILE RESPONSIVE (info, tidak memengaruhi skor 8 cek) ----
@@ -516,7 +516,7 @@ export async function runComplianceCheck(rawUrl: string): Promise<CheckResponse>
       status: homePass ? "PASS" : "FAIL", bukti: homeBukti,
       perbaikan: homePass ? "-" : FIX_SNIPPETS.logohome.perbaikan,
       snippet: homePass ? undefined : FIX_SNIPPETS.logohome.snippet,
-      foundUrl: logoHref ? new URL(logoHref, finalUrl).toString() : null,
+      foundUrl: logoTarget ? logoTarget.toString() : null,
     },
     {
       no: 9, key: "mobile", kriteria: "Mobile-responsive",

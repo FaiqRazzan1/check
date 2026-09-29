@@ -39,6 +39,14 @@ function validHref(h){
   if(h.toLowerCase().startsWith('javascript:')) return false;
   return true;
 }
+// Helper "apakah URL = home" — mirror dari lib/logo-home.ts (jaga sinkron).
+// Toleran: /index.html, /home, /beranda, /id, query/hash, www, http<->https.
+const HOME_PATHS=['/','/index.html','/index.htm','/index.php','/home','/beranda','/homepage','/main','/welcome','/default.aspx','/default','/id','/en','/ms','/de','/fr','/es','/pt','/nl','/it','/ja','/zh','/ko','/ar','/hi','/th','/vi'];
+function normHost(h){return (h||'').toLowerCase().replace(/^www\./,'');}
+function normPath(p){p=(p||'/');try{p=decodeURIComponent(p);}catch(e){}p=String(p).toLowerCase();if(p.length>1)p=p.replace(/\/+$/,'');return p||'/';}
+function pathIsHome(p){p=normPath(p);if(HOME_PATHS.includes(p))return true;const s=p.split('/').filter(Boolean);if(s.length===1&&HOME_PATHS.includes('/'+s[0]))return true;if(s.length===2&&HOME_PATHS.includes('/'+s[0])&&HOME_PATHS.includes('/'+s[1]))return true;return false;}
+function sameSite(a,b){const okProto=(a.protocol==='http:'||a.protocol==='https:')&&(b.protocol==='http:'||b.protocol==='https:');if(!okProto)return false;if(normHost(a.hostname)!==normHost(b.hostname))return false;const pa=a.port||(a.protocol==='https:'?'443':'80'),pb=b.port||(b.protocol==='https:'?'443':'80');if(pa===pb)return true;const httpPair=(a.protocol==='http:'&&b.protocol==='https:')||(a.protocol==='https:'&&b.protocol==='http:');return httpPair&&((pa==='80'&&pb==='443')||(pa==='443'&&pb==='80'));}
+function isHomeUrl(cand,home){let c,h;try{c=new URL(cand);h=new URL(home);}catch(e){return false;}if(!sameSite(c,h))return false;if(pathIsHome(c.pathname))return true;return normPath(c.pathname)===normPath(h.pathname);}
 async function cek(){
   const prog=document.getElementById('prog'),out=document.getElementById('out');
   out.innerHTML='';prog.textContent='Mengambil HTML...';
@@ -66,19 +74,21 @@ async function cek(){
     });
     const logoA=logo?logo.closest('a'):null;
     const href=(logoA?logoA.getAttribute('href'):'')||'';
-    // BUGFIX: bandingkan dengan hostname SITUS TARGET (raw), bukan alamat halaman checker ini
-    let homePass=false;
+    // BUGFIX: bandingkan dengan SITUS TARGET (raw); isHomeUrl toleran
+    // /index.html, /home, /beranda, /id, query/hash, www, http<->https.
+    let homePass=false,homeNote='';
     if(logoA){
-      if(href===''||href==='/'||href==='./') homePass=true;
-      else if(!href.startsWith('#')&&!href.toLowerCase().startsWith('javascript')){
+      const h=(href||'').trim();
+      if(h===''){ homePass=true; homeNote='reload homepage'; }
+      else if(!h.startsWith('#')&&!h.toLowerCase().startsWith('javascript')){
         try{
-          const u=new URL(href,raw);
-          const tHost=new URL(raw).hostname;
-          homePass=u.hostname===tHost&&(u.pathname==='/'||u.pathname===''||u.href===raw);
+          const abs=new URL(href,raw).toString();
+          homePass=isHomeUrl(abs,raw);
+          homeNote='→ '+abs;
         }catch(e){ homePass=false; }
       }
     }
-    checks.push({no:8,kriteria:'Logo → Home',status:homePass?'PASS':'FAIL',bukti:logoA?`href=${href}`:'tanpa parent <a>'});
+    checks.push({no:8,kriteria:'Logo → Home',status:homePass?'PASS':'FAIL',bukti:logoA?`href=${href} ${homeNote}`.trim():'tanpa parent <a>'});
     // ---- 9. MOBILE RESPONSIVE (info, tidak memengaruhi skor 8 cek) ----
     prog.textContent='Mengecek mobile-responsive...';
     const vp=(doc.querySelector('meta[name="viewport"]')||{}).content||doc.querySelector('meta[name="viewport"]')?.getAttribute('content')||'';

@@ -94,7 +94,18 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-6 sm:p-6">
-      <h1 className="text-2xl font-bold sm:text-3xl">🛡️ Website Compliance Checker</h1>
+      <header className="flex items-center gap-3">
+        <a href="/" aria-label="Website Compliance Checker - Home">
+          <img
+            src="/logo.svg"
+            alt="Website Compliance Checker Logo"
+            width={40}
+            height={40}
+            className="h-10 w-10"
+          />
+        </a>
+        <h1 className="text-2xl font-bold sm:text-3xl">🛡️ Website Compliance Checker</h1>
+      </header>
       <p className="mt-1 text-slate-400">
         9 kriteria • ~11,1% per cek • 100% = <b className="text-green-400">PASS</b>, &lt;100% = <b className="text-red-400">FAIL</b> (termasuk 📱 mobile)
       </p>
